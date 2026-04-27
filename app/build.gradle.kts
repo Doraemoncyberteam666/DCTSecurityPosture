@@ -6,6 +6,7 @@ plugins {
 android {
     namespace = "com.dct.securityposture"
     compileSdk = 35
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.dct.securityposture"
@@ -13,6 +14,38 @@ android {
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
+
+        ndk {
+            abiFilters += listOf("armeabi-v7a", "arm64-v8a", "x86", "x86_64")
+        }
+
+        externalNativeBuild {
+            cmake {
+                arguments += listOf("-DANDROID_STL=c++_static")
+                cppFlags += listOf(
+                    "-std=c++17",
+                    "-fvisibility=hidden",
+                    "-fno-rtti",
+                    "-fno-exceptions",
+                    "-Os"
+                )
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
+        }
+    }
+
+    packaging {
+        jniLibs {
+            // Keep .so files in the APK so /proc/self/maps reflects them and
+            // System.loadLibrary picks them up directly without extracting.
+            useLegacyPackaging = false
+        }
     }
 
     buildTypes {
