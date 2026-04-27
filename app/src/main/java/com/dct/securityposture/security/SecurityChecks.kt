@@ -7,6 +7,7 @@ import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Debug
+import android.os.Process
 import android.provider.Settings
 import com.dct.securityposture.model.SecurityCheck
 import com.dct.securityposture.model.Severity
@@ -41,7 +42,25 @@ object SecurityChecks {
         suspiciousMountsCheck(),
         cleartextTrafficPolicyCheck(context),
         allowBackupCheck(context),
-        appDataDirWritableCheck(context)
+        appDataDirWritableCheck(context),
+        // ---------------- Level-2 anti-bypass checks (hardened Java side) ----------------
+        magiskMountsCheck(),
+        bootloaderUnlockCheck(),
+        processIdentityCheck(context),
+        processCmdlineCheck(context),
+        suspiciousThreadNamesCheck(),
+        suspiciousLoadedLibrariesCheck(),
+        runtimeUidIntegrityCheck(context),
+        // ---------------- Level-2 native (JNI) cross-checks ------------------------------
+        nativeLibPresenceCheck(),
+        nativeTracerPidCheck(),
+        nativePtraceAttachCheck(),
+        nativeMapsIndicatorsCheck(),
+        nativeThreadIndicatorsCheck(),
+        nativeSelinuxEnforceCheck(),
+        nativeSuspiciousMountsCheck(),
+        nativeApkPathConsistencyCheck(context),
+        nativeTimingHookCheck()
     )
 
     private fun pass(title: String, summary: String, details: String, category: String, severity: Severity = Severity.INFO) =
@@ -322,6 +341,225 @@ object SecurityChecks {
         else fail("App private storage", "Private files dir is not writable", dir.absolutePath, "Config", Severity.MEDIUM)
     }
 
+    // ---------------------------------------------------------------------------------------
+    // Level-2 hardened Java-side checks. These complement the existing posture checks with
+    // signals that are harder to fake from a single point hook.
+    // ---------------------------------------------------------------------------------------
+
+    private fun magiskMountsCheck(): SecurityCheck {
+        val candidates = listOf("/proc/self/mounts", "/proc/mounts")
+        val hits = mutableListOf<String>()
+        for (path in candidates) {
+            val lines = try { File(path).readLines() } catch (_: Throwable) { continue }
+            for (line in lines) {
+                val l = line.lowercase(Locale.US)
+                val isMagiskOverlay = l.contains("magisk") || l.contains("/data/adb")
+                val isTmpfsOverSystem = l.contains("tmpfs") &&
+                    (l.contains(" /system ") || l.contains(" /vendor ") || l.contains(" /product "))
+                if (isMagiskOverlay || isTmpfsOverSystem) hits += line
+            }
+            if (hits.isNotEmpty()) break
+        }
+        return if (hits.isEmpty()) pass("Magisk mount overlay", "No magisk-style overlay mounts detected", candidates.joinToString("\n"), "Root")
+        else fail("Magisk mount overlay", "Magisk/zygisk-style overlay mount detected", hits.take(5).joinToString("\n"), "Root", Severity.CRITICAL)
+    }
+
+    private fun bootloaderUnlockCheck(): SecurityCheck {
+        val keys = listOf(
+            "ro.boot.flash.locked",
+            "ro.boot.veritymode",
+            "ro.boot.vbmeta.device_state",
+            "ro.boot.warranty_bit",
+            "ro.warranty_bit",
+            "ro.boot.verifiedbootstate"
+        )
+        val observed = mutableMapOf<String, String>()
+        for (key in keys) observed[key] = getProp(key).ifBlank { "unknown" }
+        val locked = observed["ro.boot.flash.locked"]?.trim() ?: "unknown"
+        val vbState = observed["ro.boot.vbmeta.device_state"]?.lowercase(Locale.US) ?: "unknown"
+        val verityMode = observed["ro.boot.veritymode"]?.lowercase(Locale.US) ?: "unknown"
+        val vbState2 = observed["ro.boot.verifiedbootstate"]?.lowercase(Locale.US) ?: "unknown"
+        val warranty = (observed["ro.boot.warranty_bit"] ?: "") + (observed["ro.warranty_bit"] ?: "")
+        val problems = mutableListOf<String>()
+        if (locked == "0") problems += "flash.locked=0"
+        if (vbState == "unlocked") problems += "vbmeta.device_state=unlocked"
+        if (verityMode == "disabled" || verityMode == "logging") problems += "veritymode=$verityMode"
+        if (vbState2 == "orange" || vbState2 == "red") problems += "verifiedbootstate=$vbState2"
+        if (warranty.contains("1")) problems += "warranty_bit set"
+        val details = observed.entries.joinToString("\n") { "${it.key}=${it.value}" }
+        return if (problems.isEmpty()) pass("Bootloader / verity", "Bootloader locked & verity enforced", details, "Integrity")
+        else fail("Bootloader / verity", "Bootloader/verity weakened", "$details\n\nproblems=${problems.joinToString()}", "Integrity", Severity.HIGH)
+    }
+
+    private fun processIdentityCheck(context: Context): SecurityCheck {
+        val expectedPkg = context.packageName
+        val cmdline = try {
+            File("/proc/self/cmdline").readBytes()
+                .takeWhile { it != 0.toByte() }
+                .toByteArray()
+                .toString(Charsets.UTF_8)
+        } catch (_: Throwable) { "" }
+        val processName = cmdline.substringBefore(':').trim()
+        val ok = processName == expectedPkg || cmdline.startsWith(expectedPkg)
+        val details = "applicationId=$expectedPkg\ncmdline=$cmdline"
+        return if (ok) pass("Process identity", "cmdline matches applicationId", details, "Integrity")
+        else fail("Process identity", "cmdline does not match applicationId", details, "Integrity", Severity.HIGH)
+    }
+
+    private fun processCmdlineCheck(context: Context): SecurityCheck {
+        val javaCmd = try { File("/proc/self/cmdline").readText().replace('\u0000', ' ').trim() } catch (_: Throwable) { "" }
+        val nativeCmd = if (NativeChecks.available()) NativeChecks.nativeProcCmdline() else ""
+        val agree = javaCmd.isNotBlank() && nativeCmd.isNotBlank() && javaCmd.startsWith(nativeCmd.substringBefore(' ').trim())
+        val details = "java=$javaCmd\nnative=$nativeCmd"
+        return if (NativeChecks.available() && !agree) {
+            fail("Cmdline cross-check", "Java vs native cmdline disagree", details, "Integrity", Severity.HIGH)
+        } else if (javaCmd.isBlank()) {
+            fail("Cmdline cross-check", "/proc/self/cmdline unreadable", details, "Integrity", Severity.MEDIUM)
+        } else {
+            pass("Cmdline cross-check", "Java/native cmdline match", details, "Integrity")
+        }
+    }
+
+    private fun suspiciousThreadNamesCheck(): SecurityCheck {
+        val needles = listOf("gum-js-loop", "gmain", "gdbus", "pool-frida", "frida")
+        val taskRoot = File("/proc/self/task")
+        val children = try { taskRoot.listFiles()?.toList().orEmpty() } catch (_: Throwable) { emptyList() }
+        val hits = mutableSetOf<String>()
+        for (tid in children) {
+            val comm = try { File(tid, "comm").readText().trim().lowercase(Locale.US) } catch (_: Throwable) { continue }
+            for (n in needles) if (comm.contains(n)) hits += "${tid.name}=$comm"
+        }
+        return if (hits.isEmpty()) pass("Thread names", "No frida/xposed-style thread names", "sampled=${children.size}", "Runtime")
+        else fail("Thread names", "Suspicious thread names present", hits.joinToString("\n"), "Runtime", Severity.CRITICAL)
+    }
+
+    private fun suspiciousLoadedLibrariesCheck(): SecurityCheck {
+        val maps = try { File("/proc/self/maps").readText() } catch (_: Throwable) { "" }
+        val needles = listOf(
+            "libfrida-agent", "libfrida-gadget", "frida-server",
+            "libxposed", "liblsposed", "libsubstrate", "libedxp",
+            "libriru", "libzygisk", "linjector"
+        )
+        val hits = needles.filter { maps.contains(it, ignoreCase = true) }
+        return if (hits.isEmpty()) pass("Loaded library scan", "No instrumentation libraries mapped", "checked=${needles.size}", "Runtime")
+        else fail("Loaded library scan", "Instrumentation libraries mapped into the process", hits.joinToString(", "), "Runtime", Severity.CRITICAL)
+    }
+
+    private fun runtimeUidIntegrityCheck(context: Context): SecurityCheck {
+        val processUid = Process.myUid()
+        val appUid = context.applicationInfo.uid
+        val ok = processUid == appUid
+        val details = "Process.myUid=$processUid\nApplicationInfo.uid=$appUid"
+        return if (ok) pass("Runtime UID", "Process UID matches application UID", details, "Integrity")
+        else fail("Runtime UID", "Process UID does not match application UID", details, "Integrity", Severity.HIGH)
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // Level-2 native cross-checks. Native variants read /proc and system properties via raw
+    // syscalls, so single-point Java hooks (java.io.File, SystemProperties, Settings.Global)
+    // cannot silently flip the result.
+    // ---------------------------------------------------------------------------------------
+
+    private fun nativeLibPresenceCheck(): SecurityCheck {
+        val ok = NativeChecks.available()
+        val details = "libdctnative.so loaded=$ok"
+        return if (ok) pass("Native lib presence", "libdctnative.so loaded", details, "Integrity")
+        else fail("Native lib presence", "libdctnative.so missing or stripped from APK", details, "Integrity", Severity.HIGH)
+    }
+
+    private fun nativeTracerPidCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native TracerPid", "Debug")
+        val tracer = NativeChecks.nativeTracerPid()
+        val javaTracer = try {
+            File("/proc/self/status").readLines()
+                .firstOrNull { it.startsWith("TracerPid:") }
+                ?.substringAfter(":")
+                ?.trim()
+                ?.toIntOrNull() ?: 0
+        } catch (_: Throwable) { 0 }
+        val details = "native=$tracer\njava=$javaTracer"
+        return when {
+            tracer < 0 -> fail("Native TracerPid", "Native /proc/self/status unreadable", details, "Debug", Severity.MEDIUM)
+            tracer != javaTracer -> fail("Native TracerPid", "Java vs native TracerPid disagree", details, "Debug", Severity.CRITICAL)
+            tracer != 0 -> fail("Native TracerPid", "Native confirms ptrace tracer attached", details, "Debug", Severity.HIGH)
+            else -> pass("Native TracerPid", "Native confirms no tracer attached", details, "Debug")
+        }
+    }
+
+    private fun nativePtraceAttachCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native ptrace attach", "Debug")
+        val r = try { NativeChecks.nativePtraceSelfAttach() } catch (_: Throwable) { -1 }
+        val details = "result=$r (0=clean, 1=tracer-present, -1=inconclusive)"
+        return when (r) {
+            0 -> pass("Native ptrace attach", "Self-attach succeeded - no other tracer", details, "Debug")
+            1 -> fail("Native ptrace attach", "Self-attach refused - debugger present", details, "Debug", Severity.HIGH)
+            else -> SecurityCheck("Native ptrace attach", true, Severity.INFO, "Inconclusive", details, "Debug")
+        }
+    }
+
+    private fun nativeMapsIndicatorsCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native maps scan", "Runtime")
+        val hits = NativeChecks.nativeMapsIndicators()
+        return if (hits.isBlank()) pass("Native maps scan", "No instrumentation indicators in maps", "native scan clean", "Runtime")
+        else fail("Native maps scan", "Native scan of /proc/self/maps found indicators", hits, "Runtime", Severity.CRITICAL)
+    }
+
+    private fun nativeThreadIndicatorsCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native thread scan", "Runtime")
+        val hits = NativeChecks.nativeThreadIndicators()
+        return if (hits.isBlank()) pass("Native thread scan", "No instrumentation thread names", "native scan clean", "Runtime")
+        else fail("Native thread scan", "Native scan found instrumentation thread names", hits, "Runtime", Severity.CRITICAL)
+    }
+
+    private fun nativeSelinuxEnforceCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native SELinux", "Runtime")
+        val v = NativeChecks.nativeSelinuxEnforce()
+        val details = "/sys/fs/selinux/enforce=$v"
+        return when (v) {
+            1 -> pass("Native SELinux", "Native confirms enforcing", details, "Runtime")
+            0 -> fail("Native SELinux", "Native confirms permissive", details, "Runtime", Severity.HIGH)
+            else -> SecurityCheck("Native SELinux", true, Severity.INFO, "Unknown", details, "Runtime")
+        }
+    }
+
+    private fun nativeSuspiciousMountsCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native mount scan", "Root")
+        val hits = NativeChecks.nativeSuspiciousMounts()
+        return if (hits.isBlank()) pass("Native mount scan", "Native scan of /proc/self/mounts clean", "native scan clean", "Root")
+        else fail("Native mount scan", "Native scan flagged magisk-style overlays", hits.take(2000), "Root", Severity.CRITICAL)
+    }
+
+    private fun nativeApkPathConsistencyCheck(context: Context): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native APK path", "Integrity")
+        val nativePath = NativeChecks.nativeApkPath()
+        val expected = context.applicationInfo.sourceDir
+        val ok = nativePath.isNotBlank() && nativePath == expected
+        val details = "native=$nativePath\nexpected=$expected"
+        return if (ok) pass("Native APK path", "sourceDir matches /proc/self/maps", details, "Integrity")
+        else fail("Native APK path", "sourceDir disagrees with native /proc/self/maps", details, "Integrity", Severity.HIGH)
+    }
+
+    private fun nativeTimingHookCheck(): SecurityCheck {
+        if (!NativeChecks.available()) return skipped("Native timing hook", "Runtime")
+        // Run a few iterations and pick the median to dampen scheduler noise.
+        val samples = LongArray(5) { NativeChecks.nativeTimingNanos() }
+        samples.sort()
+        val median = samples[samples.size / 2]
+        val max = samples.maxOrNull() ?: median
+        // Empirically a clean run completes the loop in < 50 ms even on slow ARMv7 devices.
+        // A wildly larger value (>= 250 ms) is a strong indicator of inline hooks slowing
+        // every iteration. A single max outlier far above the median is also suspicious.
+        val medianMs = median / 1_000_000.0
+        val maxMs = max / 1_000_000.0
+        val details = "samples_ns=${samples.joinToString()}\nmedian_ms=$medianMs\nmax_ms=$maxMs"
+        val degraded = median > 250_000_000L || max > 4 * median.coerceAtLeast(1)
+        return if (!degraded) pass("Native timing hook", "Tight loop timing within expected envelope", details, "Runtime")
+        else fail("Native timing hook", "Tight loop timing degraded (possible inline hooks)", details, "Runtime", Severity.MEDIUM)
+    }
+
+    private fun skipped(title: String, category: String): SecurityCheck =
+        SecurityCheck(title, true, Severity.INFO, "Skipped (native lib unavailable)", "libdctnative.so not loaded", category)
+
     private fun portOpenLocalhost(port: Int): Boolean {
         return try {
             java.net.Socket("127.0.0.1", port).use { true }
@@ -352,6 +590,12 @@ object SecurityChecks {
 
     @SuppressLint("PrivateApi")
     private fun getProp(key: String): String {
+        // Layered reads: native first (resists Java reflection hooks), then SystemProperties
+        // reflection, then a final getprop(1) fallback. Multiple sources let us cross-check.
+        if (NativeChecks.available()) {
+            val nativeVal = runCatching { NativeChecks.nativeGetProp(key) }.getOrDefault("")
+            if (nativeVal.isNotBlank()) return nativeVal
+        }
         return try {
             val clazz = Class.forName("android.os.SystemProperties")
             val get = clazz.getMethod("get", String::class.java)

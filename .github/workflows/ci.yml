@@ -31,6 +31,16 @@ jobs:
         with:
           gradle-version: '8.10.2'
 
+      - name: Install NDK + CMake for Level-2 native checks
+        run: |
+          set -euo pipefail
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$(command -v sdkmanager)"
+          fi
+          yes | "$SDKMANAGER" --licenses >/dev/null || true
+          "$SDKMANAGER" --install "ndk;26.1.10909125" "cmake;3.22.1"
+
       - name: Build debug APK
         run: gradle :app:assembleDebug --stacktrace
 
