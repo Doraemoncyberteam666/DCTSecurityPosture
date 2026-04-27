@@ -127,11 +127,13 @@ abstract class GenerateStringVaultTask : DefaultTask() {
     }
 }
 
+val obfuscatorOutDir = layout.buildDirectory.dir("generated/source/obfuscator")
+
 val generateStringVault = tasks.register<GenerateStringVaultTask>("generateStringVault") {
     catalog.set(file("src/main/obfuscator/strings.txt"))
     packageName.set("com.dct.securityposture.obf")
     className.set("V")
-    outDir.set(layout.buildDirectory.dir("generated/source/obfuscator"))
+    outDir.set(obfuscatorOutDir)
     // Rotate XOR key on every build.
     outputs.upToDateWhen { false }
 }
@@ -143,12 +145,12 @@ android {
 
     sourceSets {
         getByName("main") {
-            // Wire the StringVault generator's output directory in as a
-            // Kotlin source root. Passing the TaskProvider's flat-mapped
-            // output property both adds the directory and registers the
-            // task as a dependency of any consumer (compile*Kotlin), so
-            // we don't need an explicit `dependsOn`.
-            kotlin.srcDir(generateStringVault.flatMap { it.outDir })
+            // Register the StringVault generator's output directory as a
+            // Kotlin source root. Task dependency on `generateStringVault`
+            // is wired explicitly below, since AGP's Kotlin source set
+            // does not always propagate provider task dependencies up to
+            // KotlinCompile in this AGP/KGP combination.
+            kotlin.srcDir(obfuscatorOutDir)
         }
     }
 
@@ -214,6 +216,14 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+// Make every Kotlin compile task depend on the string-vault generator so
+// V.kt is materialised before kotlinc walks the source roots.
+tasks.matching {
+    it.name.startsWith("compile") && it.name.endsWith("Kotlin")
+}.configureEach {
+    dependsOn(generateStringVault)
 }
 
 dependencies {
