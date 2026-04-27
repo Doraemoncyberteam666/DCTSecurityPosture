@@ -2,13 +2,21 @@ name: Android CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches:
+      - '**'
+    tags:
+      - 'v*'
   pull_request:
-    branches: [ main, master ]
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# Avoid duplicate runs (push + pull_request on the same SHA) and cancel
+# in-flight runs when a new commit lands on the same ref.
+concurrency:
+  group: android-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build:
