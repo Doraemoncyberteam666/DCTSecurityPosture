@@ -141,6 +141,17 @@ android {
     compileSdk = 35
     ndkVersion = "26.1.10909125"
 
+    sourceSets {
+        getByName("main") {
+            // Wire the StringVault generator's output directory in as a
+            // Kotlin source root. Passing the TaskProvider's flat-mapped
+            // output property both adds the directory and registers the
+            // task as a dependency of any consumer (compile*Kotlin), so
+            // we don't need an explicit `dependsOn`.
+            kotlin.srcDir(generateStringVault.flatMap { it.outDir })
+        }
+    }
+
     defaultConfig {
         applicationId = "com.dct.securityposture"
         minSdk = 23
@@ -202,15 +213,6 @@ android {
     }
     kotlinOptions {
         jvmTarget = "17"
-    }
-}
-
-androidComponents {
-    onVariants { variant ->
-        variant.sources.kotlin?.addGeneratedSourceDirectory(
-            generateStringVault,
-            GenerateStringVaultTask::outDir
-        )
     }
 }
 
