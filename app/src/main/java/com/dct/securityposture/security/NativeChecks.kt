@@ -1,5 +1,7 @@
 package com.dct.securityposture.security
 
+import com.dct.securityposture.obf.V
+
 /**
  * Bridge to the Level-2 native (`libdctnative.so`) integrity checks.
  *
@@ -14,7 +16,10 @@ package com.dct.securityposture.security
  */
 object NativeChecks {
     private val loaded: Boolean = runCatching {
-        System.loadLibrary("dctnative")
+        // Library name is XOR-encoded in the StringVault and only materialised
+        // here at runtime so static `strings(1)`/baksmali searches for the
+        // .so name don't reveal it.
+        System.loadLibrary(V.s(V.DCTNATIVE))
         true
     }.getOrDefault(false)
 

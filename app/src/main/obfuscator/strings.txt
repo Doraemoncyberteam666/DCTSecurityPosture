@@ -1,0 +1,81 @@
+# DCT Security Posture — string obfuscator catalog.
+#
+# Each non-comment, non-blank line is encoded into the per-build StringVault
+# (V.kt) using a fresh random rolling XOR key chosen by the Gradle task
+# `GenerateStringVaultTask`. Source code references entries by stable integer
+# IDs derived from the line's text (uppercased, non-alphanumerics → '_').
+#
+# Adding/removing/reordering entries is fine — IDs are derived from text, not
+# index — but renaming will rename the const, so update call sites.
+
+# -- Hooking framework / instrumentation indicators ------------------------------
+frida
+gum-js-loop
+gmain
+gdbus
+pool-frida
+frida-server
+frida-agent
+frida-gadget
+xposed
+lsposed
+substrate
+edxp
+riru
+zygisk
+linjector
+magisk
+
+# -- Library names ---------------------------------------------------------------
+libfrida-agent
+libfrida-gadget
+libxposed
+liblsposed
+libsubstrate
+libedxp
+libriru
+libzygisk
+
+# -- Filesystem indicators -------------------------------------------------------
+/proc/self/maps
+/proc/self/status
+/proc/self/mounts
+/proc/self/task
+/proc/self/cmdline
+/proc/mounts
+/sys/fs/selinux/enforce
+/data/adb
+base.apk
+
+# -- Suspicious package names ----------------------------------------------------
+com.topjohnwu.magisk
+eu.chainfire.supersu
+com.koushikdutta.superuser
+com.noshufou.android.su
+com.thirdparty.superuser
+io.github.vvb2060.magisk
+de.robv.android.xposed.installer
+org.lsposed.manager
+com.saurik.substrate
+com.zachspong.temprootremovejb
+com.devadvance.rootcloak
+
+# -- System properties -----------------------------------------------------------
+ro.boot.flash.locked
+ro.boot.veritymode
+ro.boot.vbmeta.device_state
+ro.boot.warranty_bit
+ro.warranty_bit
+ro.boot.verifiedbootstate
+ro.boot.selinux
+ro.build.selinux
+ro.debuggable
+ro.secure
+service.adb.root
+ro.build.tags
+
+# -- Native lib name -------------------------------------------------------------
+dctnative
+
+# -- /proc/self/status field -----------------------------------------------------
+TracerPid:

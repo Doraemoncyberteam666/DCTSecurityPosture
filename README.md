@@ -75,6 +75,57 @@ The native module is built for `armeabi-v7a`, `arm64-v8a`, `x86`, and
 non-executable stack. Indicator strings are XOR-encoded at compile
 time so `strings(1)` on the `.so` does not reveal the watch list.
 
+## Custom Kotlin obfuscator
+
+Both the Kotlin/Java side and the C++ side keep their indicator
+literals out of the static binary — but they use different
+mechanisms. The Kotlin obfuscator is a self-contained Gradle task
+defined in [`app/build.gradle.kts`](app/build.gradle.kts):
+
+- Catalog: [`app/src/main/obfuscator/strings.txt`](app/src/main/obfuscator/strings.txt)
+  is a newline-separated list of every literal we don't want to ship
+  in plaintext (Frida/Xposed/Magisk indicators, suspicious package
+  names, `/proc` paths, sysprop keys, the JNI library name, the
+  `TracerPid:` field).
+- Generator: `GenerateStringVaultTask` reads the catalog, picks a
+  fresh 16-byte rolling XOR key from `SecureRandom` on every build,
+  encodes every entry, and emits
+  `com.dct.securityposture.obf.V` into
+  `app/build/generated/source/obfuscator/`. The generated class
+  exposes:
+  - `private val K: ByteArray` — the per-build rolling key,
+  - `private val D: Array<ByteArray>` — the encoded entries,
+  - `private val cache: Array<String?>` — lazy decode cache,
+  - `@JvmStatic fun s(id: Int): String` — XOR-decode + cache,
+  - one `const val NAME: Int = idx` per catalog entry, derived from
+    the entry text (`frida` → `FRIDA`, `/proc/self/maps` →
+    `PROC_SELF_MAPS`, `com.topjohnwu.magisk` →
+    `COM_TOPJOHNWU_MAGISK`, …).
+- Wiring: the task is attached via
+  `androidComponents.onVariants { variant.sources.kotlin?.addGeneratedSourceDirectory(...) }`,
+  so generated sources participate in normal Kotlin compilation and
+  R8 minification. `outputs.upToDateWhen { false }` forces the task
+  to re-run every Gradle invocation, rotating the encoding for every
+  CI build.
+- Call sites: `SecurityChecks.kt` and `NativeChecks.kt` reference
+  literals through `V.s(V.FRIDA)` / `V.s(V.PROC_SELF_MAPS)` / etc.,
+  so naive Frida hooks on `String.equals`, `strings(1)` over the
+  `classes.dex`, and `baksmali` greps over the disassembly cannot
+  see the watch list. The const-val IDs are inlined by the Kotlin
+  compiler, so call sites compile to `V.s(0)`, `V.s(1)`, …
+- R8 hardening: `app/proguard-rules.pro` keeps `V`'s members,
+  removes Kotlin null-check parameter names via
+  `kotlin.jvm.internal.Intrinsics` `assumenosideeffects`, scrubs
+  source-file metadata (`-renamesourcefileattribute SourceFile`),
+  and keeps the existing `-repackageclasses 'x'`,
+  `-allowaccessmodification`, `-overloadaggressively`,
+  `-adaptclassstrings`/`-adaptresourcefilenames`/
+  `-adaptresourcefilecontents` aggressive obfuscation flags.
+
+To extend: add a new line to `strings.txt`, run a build, then
+reference it from Kotlin via `V.s(V.<DERIVED_ID>)`. The derived ID
+is the entry uppercased with non-alphanumerics replaced by `_`.
+
 ## Build
 
 ```bash
