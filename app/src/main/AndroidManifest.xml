@@ -12,7 +12,6 @@
         <package android:name="org.lsposed.manager" />
         <package android:name="io.github.vvb2060.magisk" />
         <package android:name="com.android.vending" />
-        <package android:name="com.google.android.gms" />
     </queries>
 
     <application
