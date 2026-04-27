@@ -11,15 +11,21 @@ Kotlin Android demo app that shows a checklist-style device/app security posture
 - VM / emulator filesystem marker detection
 - ADB enabled detection
 - Runtime debugger detection
+- Developer options enabled detection
+- Tracer PID / ptrace detection
 - App debuggable flag detection
 - APK signature SHA-256 tamper baseline
+- Suspicious sensitive permissions requested by app
+- Known Frida server port scan
 - Install source / installer package detection
-- Google Play services visibility
 - Xposed / LSPosed / Substrate style framework indicators
+- Suspicious process memory map indicators (Frida/Xposed/Substrate)
+- Verified boot property validation
+- SELinux permissive mode indicators
+- Writable `/system`/`/vendor` mount indicators
 - Cleartext HTTP traffic policy
 - `allowBackup` policy
 - Private app data directory writability
-- Play Integrity client availability
 
 ## Build
 
@@ -57,11 +63,19 @@ com.amazon.venezia               Amazon Appstore
 null / unknown                   Sideload, adb, or hidden/unavailable source
 ```
 
-## Play Integrity
+## Custom integrity baseline
 
-SafetyNet Attestation is deprecated/replaced by Play Integrity. This project includes `PlayIntegrity.kt` for the client token request, but the real verdict must be decoded and verified server-side using a server-generated nonce.
+This app intentionally does **not** use Google Play Integrity. It uses a custom local baseline approach that includes:
 
-Do not treat the on-device token request itself as a trusted verdict.
+- hard-coded release certificate SHA-256 matching
+- install source trust checks
+- boot state / SELinux / root / instrumentation indicators
+
+Configured signing baseline:
+
+```text
+42:3E:15:F5:0C:27:D6:F6:AE:B8:32:BF:EF:8E:82:B7:7B:5C:F4:BD:D3:87:83:29:99:F6:F6:F1:18:E9:A5:F3
+```
 
 ## GitHub Actions build artifact
 

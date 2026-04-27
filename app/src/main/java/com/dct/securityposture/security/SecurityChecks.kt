@@ -17,8 +17,7 @@ import java.security.MessageDigest
 import java.util.Locale
 
 object SecurityChecks {
-    // Replace this after building once. See README: ./gradlew signingReport or use the included helper.
-    private const val EXPECTED_RELEASE_SHA256 = "PUT_RELEASE_CERT_SHA256_HERE"
+    private const val EXPECTED_RELEASE_SHA256 = "42:3E:15:F5:0C:27:D6:F6:AE:B8:32:BF:EF:8E:82:B7:7B:5C:F4:BD:D3:87:83:29:99:F6:F6:F1:18:E9:A5:F3"
 
     fun runAll(context: Context): List<SecurityCheck> = listOf(
         rootBinaryCheck(),
@@ -27,16 +26,22 @@ object SecurityChecks {
         emulatorBuildCheck(),
         emulatorFilesCheck(),
         adbEnabledCheck(context),
+        developerOptionsCheck(context),
         debuggerAttachedCheck(),
+        tracerPidCheck(),
         appDebuggableFlagCheck(context),
         signatureIntegrityCheck(context),
+        suspiciousRuntimePermissionsCheck(context),
+        fridaPortCheck(),
         installerSourceCheck(context),
-        googlePlayServicesCheck(context),
         hookingFrameworkCheck(context),
+        suspiciousProcessMapsCheck(),
+        verifiedBootCheck(),
+        selinuxEnforcingCheck(),
+        suspiciousMountsCheck(),
         cleartextTrafficPolicyCheck(context),
         allowBackupCheck(context),
-        appDataDirWritableCheck(context),
-        playIntegrityClientAvailabilityCheck(context)
+        appDataDirWritableCheck(context)
     )
 
     private fun pass(title: String, summary: String, details: String, category: String, severity: Severity = Severity.INFO) =
@@ -197,10 +202,46 @@ object SecurityChecks {
         else fail("Install source", "Untrusted or unknown install source: $label", details.toString(), "Integrity", Severity.MEDIUM)
     }
 
-    private fun googlePlayServicesCheck(context: Context): SecurityCheck {
-        val installed = isPackageInstalled(context, "com.google.android.gms")
-        return if (installed) pass("Google Play services", "GMS package visible", "com.google.android.gms installed", "Attestation")
-        else fail("Google Play services", "GMS package not visible", "Play Integrity requires Google Play services on normal GMS devices.", "Attestation", Severity.MEDIUM)
+    private fun developerOptionsCheck(context: Context): SecurityCheck {
+        val enabled = try {
+            Settings.Global.getInt(context.contentResolver, Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0) == 1
+        } catch (_: Throwable) { false }
+        return if (!enabled) pass("Developer options", "Developer options disabled", "Settings.Global.DEVELOPMENT_SETTINGS_ENABLED=0", "Debug")
+        else fail("Developer options", "Developer options enabled", "Settings.Global.DEVELOPMENT_SETTINGS_ENABLED=1", "Debug", Severity.MEDIUM)
+    }
+
+    private fun tracerPidCheck(): SecurityCheck {
+        val value = try {
+            File("/proc/self/status").readLines()
+                .firstOrNull { it.startsWith("TracerPid:") }
+                ?.substringAfter(":")
+                ?.trim()
+                ?.toIntOrNull() ?: 0
+        } catch (_: Throwable) { 0 }
+        return if (value == 0) pass("Tracer PID", "No ptrace tracer attached", "TracerPid=0", "Debug")
+        else fail("Tracer PID", "Process is being traced", "TracerPid=$value", "Debug", Severity.HIGH)
+    }
+
+    private fun suspiciousRuntimePermissionsCheck(context: Context): SecurityCheck {
+        val suspicious = listOf(
+            android.Manifest.permission.READ_LOGS,
+            android.Manifest.permission.WRITE_SECURE_SETTINGS,
+            android.Manifest.permission.QUERY_ALL_PACKAGES
+        )
+        val requested = try {
+            val info = context.packageManager.getPackageInfo(context.packageName, PackageManager.GET_PERMISSIONS)
+            info.requestedPermissions?.toList().orEmpty()
+        } catch (_: Throwable) { emptyList() }
+        val hits = requested.intersect(suspicious.toSet())
+        return if (hits.isEmpty()) pass("Sensitive permissions", "No high-risk debug/tamper permissions requested", requested.sorted().joinToString("\n"), "Config")
+        else fail("Sensitive permissions", "High-risk permissions requested", hits.joinToString("\n"), "Config", Severity.MEDIUM)
+    }
+
+    private fun fridaPortCheck(): SecurityCheck {
+        val ports = listOf(23946, 27042, 27043)
+        val hits = ports.filter { portOpenLocalhost(it) }
+        return if (hits.isEmpty()) pass("Frida ports", "No known Frida server ports open", ports.joinToString(", "), "Runtime")
+        else fail("Frida ports", "Known dynamic instrumentation port open", hits.joinToString(", "), "Runtime", Severity.CRITICAL)
     }
 
     private fun hookingFrameworkCheck(context: Context): SecurityCheck {
@@ -219,6 +260,45 @@ object SecurityChecks {
         }
         return if (visible.isEmpty() && !stackHit) pass("Hooking frameworks", "No visible hooking framework indicators", details, "Runtime")
         else fail("Hooking frameworks", "Hooking/runtime instrumentation indicators found", details, "Runtime", Severity.HIGH)
+    }
+
+    private fun suspiciousProcessMapsCheck(): SecurityCheck {
+        val indicators = listOf("frida", "gum-js-loop", "xposed", "substrate", "edxp")
+        val hits = try {
+            File("/proc/self/maps").readText().lowercase(Locale.US).let { maps ->
+                indicators.filter { maps.contains(it) }
+            }
+        } catch (_: Throwable) { emptyList() }
+        return if (hits.isEmpty()) pass("Process maps", "No suspicious hooking libs in memory map", indicators.joinToString(", "), "Runtime")
+        else fail("Process maps", "Suspicious in-memory artifacts detected", hits.joinToString(", "), "Runtime", Severity.CRITICAL)
+    }
+
+    private fun verifiedBootCheck(): SecurityCheck {
+        val state = getProp("ro.boot.verifiedbootstate").ifBlank { "unknown" }.lowercase(Locale.US)
+        val mode = getProp("ro.boot.flash.locked").ifBlank { "unknown" }
+        val details = "verifiedbootstate=$state\nflash.locked=$mode"
+        val ok = state == "green" || state == "unknown"
+        return if (ok) pass("Verified boot", "Boot state not flagged as compromised", details, "Integrity")
+        else fail("Verified boot", "Boot state indicates reduced trust", details, "Integrity", Severity.HIGH)
+    }
+
+    private fun selinuxEnforcingCheck(): SecurityCheck {
+        val value = getProp("ro.build.selinux").ifBlank { "unknown" }
+        val enforce = getProp("ro.boot.selinux").ifBlank { "unknown" }
+        val details = "ro.build.selinux=$value\nro.boot.selinux=$enforce"
+        val risky = listOf(value, enforce).any { it.contains("permissive", ignoreCase = true) || it == "0" }
+        return if (!risky) pass("SELinux mode", "No permissive SELinux indicator", details, "Runtime")
+        else fail("SELinux mode", "Permissive SELinux indicator found", details, "Runtime", Severity.HIGH)
+    }
+
+    private fun suspiciousMountsCheck(): SecurityCheck {
+        val lines = try { File("/proc/mounts").readLines() } catch (_: Throwable) { emptyList() }
+        val hits = lines.filter { line ->
+            (line.contains(" /system ") || line.contains(" /vendor ")) &&
+                line.contains(" rw,")
+        }
+        return if (hits.isEmpty()) pass("Readonly partitions", "No writable system/vendor mount marker", "checked=/proc/mounts", "Root")
+        else fail("Readonly partitions", "System partition mounted read-write", hits.take(5).joinToString("\n"), "Root", Severity.HIGH)
     }
 
     private fun cleartextTrafficPolicyCheck(context: Context): SecurityCheck {
@@ -242,15 +322,10 @@ object SecurityChecks {
         else fail("App private storage", "Private files dir is not writable", dir.absolutePath, "Config", Severity.MEDIUM)
     }
 
-    private fun playIntegrityClientAvailabilityCheck(context: Context): SecurityCheck {
+    private fun portOpenLocalhost(port: Int): Boolean {
         return try {
-            val clazz = Class.forName("com.google.android.play.core.integrity.IntegrityManagerFactory")
-            val method = clazz.getMethod("create", Context::class.java)
-            val manager = method.invoke(null, context)
-            pass("Play Integrity client", "Client library loaded", "manager=${manager?.javaClass?.name}\nUse PlayIntegrity.kt with a server-generated nonce for a real verdict.", "Attestation")
-        } catch (e: Throwable) {
-            fail("Play Integrity client", "Client unavailable", e.javaClass.name + ": " + (e.message ?: "no message"), "Attestation", Severity.MEDIUM)
-        }
+            java.net.Socket("127.0.0.1", port).use { true }
+        } catch (_: Throwable) { false }
     }
 
     private fun isPackageInstalled(context: Context, pkg: String): Boolean = try {
