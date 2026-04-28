@@ -11,6 +11,7 @@ import android.os.Process
 import android.provider.Settings
 import com.dct.securityposture.model.SecurityCheck
 import com.dct.securityposture.model.Severity
+import com.dct.securityposture.obf.V
 import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
@@ -82,17 +83,18 @@ object SecurityChecks {
 
     private fun dangerousPropsCheck(): SecurityCheck {
         val props = mapOf(
-            "ro.debuggable" to "0",
-            "ro.secure" to "1",
-            "service.adb.root" to "0",
-            "ro.build.tags" to "release-keys"
+            V.s(V.RO_DEBUGGABLE) to "0",
+            V.s(V.RO_SECURE) to "1",
+            V.s(V.SERVICE_ADB_ROOT) to "0",
+            V.s(V.RO_BUILD_TAGS) to "release-keys"
         )
         val bad = mutableListOf<String>()
         val observed = mutableListOf<String>()
+        val buildTagsKey = V.s(V.RO_BUILD_TAGS)
         for ((key, expected) in props) {
             val value = getProp(key)
             observed += "$key=$value"
-            if (key == "ro.build.tags") {
+            if (key == buildTagsKey) {
                 if (value.contains("test-keys", ignoreCase = true)) bad += "$key=$value"
             } else if (value.isNotBlank() && value != expected) bad += "$key=$value expected=$expected"
         }
@@ -102,8 +104,12 @@ object SecurityChecks {
 
     private fun rootManagementAppsCheck(context: Context): SecurityCheck {
         val packages = listOf(
-            "com.topjohnwu.magisk", "eu.chainfire.supersu", "com.koushikdutta.superuser",
-            "com.noshufou.android.su", "com.thirdparty.superuser", "io.github.vvb2060.magisk"
+            V.s(V.COM_TOPJOHNWU_MAGISK),
+            V.s(V.EU_CHAINFIRE_SUPERSU),
+            V.s(V.COM_KOUSHIKDUTTA_SUPERUSER),
+            V.s(V.COM_NOSHUFOU_ANDROID_SU),
+            V.s(V.COM_THIRDPARTY_SUPERUSER),
+            V.s(V.IO_GITHUB_VVB2060_MAGISK)
         )
         val hits = packages.filter { isPackageInstalled(context, it) }
         return if (hits.isEmpty()) pass("Root manager apps", "No known root manager packages visible", packages.joinToString("\n"), "Root")
@@ -230,9 +236,10 @@ object SecurityChecks {
     }
 
     private fun tracerPidCheck(): SecurityCheck {
+        val tracerKey = V.s(V.TRACERPID)
         val value = try {
-            File("/proc/self/status").readLines()
-                .firstOrNull { it.startsWith("TracerPid:") }
+            File(V.s(V.PROC_SELF_STATUS)).readLines()
+                .firstOrNull { it.startsWith(tracerKey) }
                 ?.substringAfter(":")
                 ?.trim()
                 ?.toIntOrNull() ?: 0
@@ -265,13 +272,18 @@ object SecurityChecks {
 
     private fun hookingFrameworkCheck(context: Context): SecurityCheck {
         val packages = listOf(
-            "de.robv.android.xposed.installer", "org.lsposed.manager", "io.github.vvb2060.magisk",
-            "com.saurik.substrate", "com.zachspong.temprootremovejb", "com.devadvance.rootcloak"
+            V.s(V.DE_ROBV_ANDROID_XPOSED_INSTALLER),
+            V.s(V.ORG_LSPOSED_MANAGER),
+            V.s(V.IO_GITHUB_VVB2060_MAGISK),
+            V.s(V.COM_SAURIK_SUBSTRATE),
+            V.s(V.COM_ZACHSPONG_TEMPROOTREMOVEJB),
+            V.s(V.COM_DEVADVANCE_ROOTCLOAK)
         )
         val visible = packages.filter { isPackageInstalled(context, it) }
+        val frameworkNeedles = listOf(V.s(V.XPOSED), V.s(V.SUBSTRATE), V.s(V.LSPOSED))
         val stackHit = Throwable().stackTrace.any { frame ->
             val name = frame.className.lowercase(Locale.US)
-            name.contains("xposed") || name.contains("substrate") || name.contains("lsposed")
+            frameworkNeedles.any { name.contains(it) }
         }
         val details = buildString {
             appendLine("visiblePackages=${visible.ifEmpty { listOf("none") }.joinToString()}")
@@ -282,9 +294,15 @@ object SecurityChecks {
     }
 
     private fun suspiciousProcessMapsCheck(): SecurityCheck {
-        val indicators = listOf("frida", "gum-js-loop", "xposed", "substrate", "edxp")
+        val indicators = listOf(
+            V.s(V.FRIDA),
+            V.s(V.GUM_JS_LOOP),
+            V.s(V.XPOSED),
+            V.s(V.SUBSTRATE),
+            V.s(V.EDXP)
+        )
         val hits = try {
-            File("/proc/self/maps").readText().lowercase(Locale.US).let { maps ->
+            File(V.s(V.PROC_SELF_MAPS)).readText().lowercase(Locale.US).let { maps ->
                 indicators.filter { maps.contains(it) }
             }
         } catch (_: Throwable) { emptyList() }
@@ -293,8 +311,8 @@ object SecurityChecks {
     }
 
     private fun verifiedBootCheck(): SecurityCheck {
-        val state = getProp("ro.boot.verifiedbootstate").ifBlank { "unknown" }.lowercase(Locale.US)
-        val mode = getProp("ro.boot.flash.locked").ifBlank { "unknown" }
+        val state = getProp(V.s(V.RO_BOOT_VERIFIEDBOOTSTATE)).ifBlank { "unknown" }.lowercase(Locale.US)
+        val mode = getProp(V.s(V.RO_BOOT_FLASH_LOCKED)).ifBlank { "unknown" }
         val details = "verifiedbootstate=$state\nflash.locked=$mode"
         val ok = state == "green" || state == "unknown"
         return if (ok) pass("Verified boot", "Boot state not flagged as compromised", details, "Integrity")
@@ -302,8 +320,8 @@ object SecurityChecks {
     }
 
     private fun selinuxEnforcingCheck(): SecurityCheck {
-        val value = getProp("ro.build.selinux").ifBlank { "unknown" }
-        val enforce = getProp("ro.boot.selinux").ifBlank { "unknown" }
+        val value = getProp(V.s(V.RO_BUILD_SELINUX)).ifBlank { "unknown" }
+        val enforce = getProp(V.s(V.RO_BOOT_SELINUX)).ifBlank { "unknown" }
         val details = "ro.build.selinux=$value\nro.boot.selinux=$enforce"
         val risky = listOf(value, enforce).any { it.contains("permissive", ignoreCase = true) || it == "0" }
         return if (!risky) pass("SELinux mode", "No permissive SELinux indicator", details, "Runtime")
@@ -311,12 +329,13 @@ object SecurityChecks {
     }
 
     private fun suspiciousMountsCheck(): SecurityCheck {
-        val lines = try { File("/proc/mounts").readLines() } catch (_: Throwable) { emptyList() }
+        val mountsPath = V.s(V.PROC_MOUNTS)
+        val lines = try { File(mountsPath).readLines() } catch (_: Throwable) { emptyList() }
         val hits = lines.filter { line ->
             (line.contains(" /system ") || line.contains(" /vendor ")) &&
                 line.contains(" rw,")
         }
-        return if (hits.isEmpty()) pass("Readonly partitions", "No writable system/vendor mount marker", "checked=/proc/mounts", "Root")
+        return if (hits.isEmpty()) pass("Readonly partitions", "No writable system/vendor mount marker", "checked=$mountsPath", "Root")
         else fail("Readonly partitions", "System partition mounted read-write", hits.take(5).joinToString("\n"), "Root", Severity.HIGH)
     }
 
@@ -347,13 +366,15 @@ object SecurityChecks {
     // ---------------------------------------------------------------------------------------
 
     private fun magiskMountsCheck(): SecurityCheck {
-        val candidates = listOf("/proc/self/mounts", "/proc/mounts")
+        val candidates = listOf(V.s(V.PROC_SELF_MOUNTS), V.s(V.PROC_MOUNTS))
+        val magiskNeedle = V.s(V.MAGISK)
+        val dataAdbNeedle = V.s(V.DATA_ADB)
         val hits = mutableListOf<String>()
         for (path in candidates) {
             val lines = try { File(path).readLines() } catch (_: Throwable) { continue }
             for (line in lines) {
                 val l = line.lowercase(Locale.US)
-                val isMagiskOverlay = l.contains("magisk") || l.contains("/data/adb")
+                val isMagiskOverlay = l.contains(magiskNeedle) || l.contains(dataAdbNeedle)
                 val isTmpfsOverSystem = l.contains("tmpfs") &&
                     (l.contains(" /system ") || l.contains(" /vendor ") || l.contains(" /product "))
                 if (isMagiskOverlay || isTmpfsOverSystem) hits += line
@@ -365,21 +386,20 @@ object SecurityChecks {
     }
 
     private fun bootloaderUnlockCheck(): SecurityCheck {
-        val keys = listOf(
-            "ro.boot.flash.locked",
-            "ro.boot.veritymode",
-            "ro.boot.vbmeta.device_state",
-            "ro.boot.warranty_bit",
-            "ro.warranty_bit",
-            "ro.boot.verifiedbootstate"
-        )
+        val flashLockedKey = V.s(V.RO_BOOT_FLASH_LOCKED)
+        val verityKey = V.s(V.RO_BOOT_VERITYMODE)
+        val vbmetaKey = V.s(V.RO_BOOT_VBMETA_DEVICE_STATE)
+        val warrantyKey = V.s(V.RO_BOOT_WARRANTY_BIT)
+        val warrantyKey2 = V.s(V.RO_WARRANTY_BIT)
+        val verifiedBootKey = V.s(V.RO_BOOT_VERIFIEDBOOTSTATE)
+        val keys = listOf(flashLockedKey, verityKey, vbmetaKey, warrantyKey, warrantyKey2, verifiedBootKey)
         val observed = mutableMapOf<String, String>()
         for (key in keys) observed[key] = getProp(key).ifBlank { "unknown" }
-        val locked = observed["ro.boot.flash.locked"]?.trim() ?: "unknown"
-        val vbState = observed["ro.boot.vbmeta.device_state"]?.lowercase(Locale.US) ?: "unknown"
-        val verityMode = observed["ro.boot.veritymode"]?.lowercase(Locale.US) ?: "unknown"
-        val vbState2 = observed["ro.boot.verifiedbootstate"]?.lowercase(Locale.US) ?: "unknown"
-        val warranty = (observed["ro.boot.warranty_bit"] ?: "") + (observed["ro.warranty_bit"] ?: "")
+        val locked = observed[flashLockedKey]?.trim() ?: "unknown"
+        val vbState = observed[vbmetaKey]?.lowercase(Locale.US) ?: "unknown"
+        val verityMode = observed[verityKey]?.lowercase(Locale.US) ?: "unknown"
+        val vbState2 = observed[verifiedBootKey]?.lowercase(Locale.US) ?: "unknown"
+        val warranty = (observed[warrantyKey] ?: "") + (observed[warrantyKey2] ?: "")
         val problems = mutableListOf<String>()
         if (locked == "0") problems += "flash.locked=0"
         if (vbState == "unlocked") problems += "vbmeta.device_state=unlocked"
@@ -394,7 +414,7 @@ object SecurityChecks {
     private fun processIdentityCheck(context: Context): SecurityCheck {
         val expectedPkg = context.packageName
         val cmdline = try {
-            File("/proc/self/cmdline").readBytes()
+            File(V.s(V.PROC_SELF_CMDLINE)).readBytes()
                 .takeWhile { it != 0.toByte() }
                 .toByteArray()
                 .toString(Charsets.UTF_8)
@@ -407,7 +427,7 @@ object SecurityChecks {
     }
 
     private fun processCmdlineCheck(context: Context): SecurityCheck {
-        val javaCmd = try { File("/proc/self/cmdline").readText().replace('\u0000', ' ').trim() } catch (_: Throwable) { "" }
+        val javaCmd = try { File(V.s(V.PROC_SELF_CMDLINE)).readText().replace('\u0000', ' ').trim() } catch (_: Throwable) { "" }
         val nativeCmd = if (NativeChecks.available()) NativeChecks.nativeProcCmdline() else ""
         val agree = javaCmd.isNotBlank() && nativeCmd.isNotBlank() && javaCmd.startsWith(nativeCmd.substringBefore(' ').trim())
         val details = "java=$javaCmd\nnative=$nativeCmd"
@@ -421,8 +441,14 @@ object SecurityChecks {
     }
 
     private fun suspiciousThreadNamesCheck(): SecurityCheck {
-        val needles = listOf("gum-js-loop", "gmain", "gdbus", "pool-frida", "frida")
-        val taskRoot = File("/proc/self/task")
+        val needles = listOf(
+            V.s(V.GUM_JS_LOOP),
+            V.s(V.GMAIN),
+            V.s(V.GDBUS),
+            V.s(V.POOL_FRIDA),
+            V.s(V.FRIDA)
+        )
+        val taskRoot = File(V.s(V.PROC_SELF_TASK))
         val children = try { taskRoot.listFiles()?.toList().orEmpty() } catch (_: Throwable) { emptyList() }
         val hits = mutableSetOf<String>()
         for (tid in children) {
@@ -434,11 +460,18 @@ object SecurityChecks {
     }
 
     private fun suspiciousLoadedLibrariesCheck(): SecurityCheck {
-        val maps = try { File("/proc/self/maps").readText() } catch (_: Throwable) { "" }
+        val maps = try { File(V.s(V.PROC_SELF_MAPS)).readText() } catch (_: Throwable) { "" }
         val needles = listOf(
-            "libfrida-agent", "libfrida-gadget", "frida-server",
-            "libxposed", "liblsposed", "libsubstrate", "libedxp",
-            "libriru", "libzygisk", "linjector"
+            V.s(V.LIBFRIDA_AGENT),
+            V.s(V.LIBFRIDA_GADGET),
+            V.s(V.FRIDA_SERVER),
+            V.s(V.LIBXPOSED),
+            V.s(V.LIBLSPOSED),
+            V.s(V.LIBSUBSTRATE),
+            V.s(V.LIBEDXP),
+            V.s(V.LIBRIRU),
+            V.s(V.LIBZYGISK),
+            V.s(V.LINJECTOR)
         )
         val hits = needles.filter { maps.contains(it, ignoreCase = true) }
         return if (hits.isEmpty()) pass("Loaded library scan", "No instrumentation libraries mapped", "checked=${needles.size}", "Runtime")
@@ -470,9 +503,10 @@ object SecurityChecks {
     private fun nativeTracerPidCheck(): SecurityCheck {
         if (!NativeChecks.available()) return skipped("Native TracerPid", "Debug")
         val tracer = NativeChecks.nativeTracerPid()
+        val tracerKey = V.s(V.TRACERPID)
         val javaTracer = try {
-            File("/proc/self/status").readLines()
-                .firstOrNull { it.startsWith("TracerPid:") }
+            File(V.s(V.PROC_SELF_STATUS)).readLines()
+                .firstOrNull { it.startsWith(tracerKey) }
                 ?.substringAfter(":")
                 ?.trim()
                 ?.toIntOrNull() ?: 0
